@@ -2,48 +2,24 @@ use bytes::Bytes;
 
 use derivative::Derivative;
 use geph5_broker_protocol::Credential;
-use geph5_client::{BridgeMode, BrokerSource, Config};
-use geph_nat::GephNat;
-use parking_lot::RwLock;
+use geph5_client::{BridgeMode, ExitConstraint};
 
 use sillad::Pipe;
-use smol::{
-    channel::{Receiver, Sender},
-    Task,
-};
+use smol::Task;
 use smol_str::SmolStr;
 use std::{
-    net::SocketAddr,
+    sync::atomic::Ordering,
     time::{Duration, SystemTime},
 };
 use stdcode::StdcodeSerializeExt;
 use tmelcrypt::Hashable;
 
-use sosistab2::Stream;
-use std::sync::Arc;
-
-use std::net::Ipv4Addr;
-
-use crate::config::{ConnectOpt, GEPH5_CONFIG_TEMPLATE};
+use crate::{
+    config::{ConnectOpt, GEPH5_CONFIG_TEMPLATE},
+    connect::stats::{STATS_RECV_BYTES, STATS_SEND_BYTES},
+};
 
 use super::stats::{gatherer::StatItem, STATS_GATHERER};
-
-#[derive(Clone)]
-pub struct BinderTunnelParams {
-    pub exit_server: Option<String>,
-    pub use_bridges: bool,
-    pub force_bridge: Option<Ipv4Addr>,
-    pub force_protocol: Option<String>,
-}
-
-#[derive(Clone)]
-struct TunnelCtx {
-    recv_socks5_conn: Receiver<(String, Sender<Stream>)>,
-
-    connect_status: Arc<RwLock<ConnectionStatus>>,
-    recv_vpn_outgoing: Receiver<Bytes>,
-    send_vpn_incoming: Sender<Bytes>,
-}
 
 /// A ConnectionStatus shows the status of the tunnel.
 #[derive(Clone, Derivative)]
@@ -89,6 +65,17 @@ impl ClientTunnel {
                 .clone()
                 .join(format!("cache-{}.db", opt.auth.stdcode().hash())),
         );
+        if let Some(exit) = opt.exit_server {
+            config.exit_constraint = ExitConstraint::Hostname(exit);
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        {
+            if opt.vpn_mode.is_some() {
+                config.vpn = true;
+            }
+        }
+
         log::debug!("cache path: {:?}", config.cache);
         let client = geph5_client::Client::start(config);
         let handle = client.control_client();
@@ -98,13 +85,17 @@ impl ClientTunnel {
                 let info = handle.conn_info().await.unwrap();
                 let recv_bytes = handle.stat_num("total_rx_bytes".into()).await.unwrap();
                 let send_bytes = handle.stat_num("total_tx_bytes".into()).await.unwrap();
+                STATS_RECV_BYTES.store(recv_bytes as _, Ordering::Relaxed);
+                STATS_SEND_BYTES.store(send_bytes as _, Ordering::Relaxed);
                 match info {
                     geph5_client::ConnInfo::Connecting => {}
                     geph5_client::ConnInfo::Connected(conn) => STATS_GATHERER.push(StatItem {
                         time: SystemTime::now(),
                         endpoint: conn.bridge.into(),
                         protocol: conn.protocol.into(),
-                        ping: Duration::from_millis(100),
+                        ping: Duration::from_secs_f64(
+                            handle.stat_num("ping".into()).await.unwrap(),
+                        ),
                         send_bytes: send_bytes as u64,
                         recv_bytes: recv_bytes as u64,
                     }),

@@ -1,20 +1,15 @@
 use std::{path::PathBuf, str::FromStr, sync::LazyLock};
 
 use crate::fronts::parse_fronts;
-use anyhow::Context;
 
-use geph4_protocol::binder::protocol::{BinderClient, Credentials};
+use geph4_protocol::binder::protocol::BinderClient;
 
-use geph5_client::{BridgeMode, BrokerSource, Config};
+use geph5_client::{BridgeMode, BrokerKeys, BrokerSource, Config};
 use serde::{Deserialize, Serialize};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
-    SqlitePool,
-};
+
 use std::net::{Ipv4Addr, SocketAddr};
-use stdcode::StdcodeSerializeExt;
+
 use structopt::StructOpt;
-use tmelcrypt::Ed25519SK;
 
 #[derive(Debug, StructOpt, Deserialize, Serialize, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -272,12 +267,45 @@ pub static GEPH5_CONFIG_TEMPLATE: LazyLock<Config> = LazyLock::new(|| Config {
     exit_constraint: geph5_client::ExitConstraint::Auto,
     bridge_mode: BridgeMode::Auto,
     cache: None,
-    broker: Some(BrokerSource::Fronted {
-        front: "https://vuejs.org".into(),
-        host: "svitania-naidallszei-2.netlify.app".into(),
+    broker: Some(BrokerSource::Race(vec![
+        BrokerSource::Fronted {
+            front: "https://www.cdn77.com/".into(),
+            host: "1826209743.rsc.cdn77.org".into(),
+        },
+        BrokerSource::Fronted {
+            front: "https://vuejs.org/".into(),
+            host: "svitania-naidallszei-2.netlify.app".into(),
+        },
+        BrokerSource::AwsLambda {
+            function_name: "geph-lambda-bouncer".into(),
+            region: "us-east-1".into(),
+            access_key_id: String::from_utf8_lossy(
+                &base32::decode(
+                    base32::Alphabet::Crockford,
+                    "855MJGAMB58MCPJBB97K4P2C6NC36DT8",
+                )
+                .unwrap(),
+            )
+            .to_string(),
+            secret_access_key: String::from_utf8_lossy(
+                &base32::decode(
+                    base32::Alphabet::Crockford,
+                    "8SQ7ECABES132WT4B9GQEN356XQ6GRT36NS64GBK9HP42EAGD8W6JRA39DTKAP2J",
+                )
+                .unwrap(),
+            )
+            .to_string(),
+        },
+    ])),
+    broker_keys: Some(BrokerKeys {
+        master: "88c1d2d4197bed815b01a22cadfc6c35aa246dddb553682037a118aebfaa3954".into(),
+        mizaru_free: "0558216cbab7a9c46f298f4c26e171add9af87d0694988b8a8fe52ee932aa754".into(),
+        mizaru_plus: "cf6f58868c6d9459b3a63bc2bd86165631b3e916bad7f62b578cd9614e0bcb3b".into(),
     }),
     vpn: false,
+
     spoof_dns: false,
+
     passthrough_china: false,
     dry_run: false,
     credentials: geph5_broker_protocol::Credential::TestDummy,

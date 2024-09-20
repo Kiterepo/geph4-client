@@ -1,5 +1,5 @@
 use anyhow::Context;
-use geph4_protocol::binder::protocol::{Credentials, Level, UserInfoV2};
+use geph4_protocol::binder::protocol::{Level, UserInfoV2};
 
 use geph5_broker_protocol::BrokerClient;
 use itertools::Itertools;
@@ -60,11 +60,11 @@ pub async fn sync_json(opt: SyncOpt) -> anyhow::Result<String> {
             .all_exits
             .into_iter()
             .map(|exit| DumbedDownExitDescriptor {
-                hostname: exit.1.c2e_listen.ip().to_string(),
+                hostname: exit.1.b2e_listen.ip().to_string(),
                 signing_key: hex::encode(exit.0.as_bytes()),
                 country_code: exit.1.country.alpha2().into(),
                 city_code: exit.1.city.clone(),
-                allowed_levels: if free_exits.all_exits.contains(&exit) {
+                allowed_levels: if free_exits.all_exits.iter().map(|fe| fe.0).any(|fe| fe == exit.0) {
                     vec!["free".to_string(), "plus".to_string()]
                 } else {
                     vec!["plus".to_string()]
@@ -80,6 +80,7 @@ pub async fn sync_json(opt: SyncOpt) -> anyhow::Result<String> {
             _ => todo!(),
         };
         let user_cache_key = hex::encode(blake3::hash(&opt.auth.stdcode()).as_bytes());
+        std::fs::create_dir_all(&opt.auth.credential_cache)?;
         let token_path = opt.auth.credential_cache.join(format!("{user_cache_key}-sync_auth_token"));
         let auth_token = if let Ok(val) = smol::fs::read_to_string(&token_path).await {
             val

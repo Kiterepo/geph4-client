@@ -1,17 +1,15 @@
 use anyhow::Context;
+use futures_util::{
+    io::{BufReader, BufWriter},
+    AsyncReadExt, AsyncWriteExt,
+};
 use smol::future::FutureExt;
 
 use super::ConnectContext;
 use crate::config::VpnMode;
 
-#[cfg(target_os = "linux")]
-mod linux_routing;
-
-#[cfg(target_os = "windows")]
-mod windows_routing;
-
 #[cfg(unix)]
-use std::os::unix::prelude::{AsRawFd, FromRawFd};
+use std::os::unix::prelude::FromRawFd;
 
 pub(super) async fn vpn_loop(ctx: ConnectContext) -> anyhow::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -23,43 +21,11 @@ pub(super) async fn vpn_loop(ctx: ConnectContext) -> anyhow::Result<()> {
         return unsafe { fd_vpn_loop(ctx, fd_num).await };
     }
 
-    #[cfg(target_os = "linux")]
-    if ctx.opt.vpn_mode == Some(VpnMode::TunNoRoute) {
-        let device = configure_tun_device();
-        return unsafe { fd_vpn_loop(ctx, device.as_raw_fd()).await };
-    }
-
-    #[cfg(target_os = "linux")]
-    if ctx.opt.vpn_mode == Some(VpnMode::TunRoute) {
-        let device = configure_tun_device();
-        return unsafe {
-            fd_vpn_loop(ctx.clone(), device.as_raw_fd())
-                .race(linux_routing::routing_loop(ctx.clone()))
-                .await
-        };
-    }
-
-    #[cfg(target_os = "windows")]
-    if ctx.opt.vpn_mode == Some(VpnMode::WinDivert) {
-        return windows_routing::start_routing(ctx).await;
+    if ctx.opt.vpn_mode == Some(VpnMode::Stdio) {
+        return stdio_vpn_loop(ctx).await;
     }
 
     smol::future::pending().await
-}
-
-#[cfg(target_os = "linux")]
-fn configure_tun_device() -> tun::platform::Device {
-    let device = tun::platform::Device::new(
-        tun::Configuration::default()
-            .name("tun-geph")
-            .address("100.64.89.64")
-            .netmask("255.255.255.0")
-            .destination("100.64.0.1")
-            .mtu(16384)
-            .up(),
-    )
-    .expect("could not initialize TUN device");
-    device
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -89,4 +55,40 @@ async unsafe fn fd_vpn_loop(ctx: ConnectContext, fd_num: i32) -> anyhow::Result<
         }
     };
     up_loop.race(dn_loop).await
+}
+
+async fn stdio_vpn_loop(ctx: ConnectContext) -> anyhow::Result<()> {
+    let (stdin, stdout) = (
+        smol::Unblock::new(std::io::stdin()),
+        smol::Unblock::new(std::io::stdout()),
+    );
+    let mut stdin = BufReader::new(stdin);
+    let mut stdout = BufWriter::new(stdout);
+
+    // The upload task
+    let tunnel = ctx.tunnel.clone();
+    let upload_task = async {
+        loop {
+            let mut len_bytes = [0u8; 2];
+            stdin.read_exact(&mut len_bytes).await?;
+            let len = u16::from_le_bytes(len_bytes) as usize;
+
+            let mut buffer = vec![0u8; len];
+            stdin.read_exact(&mut buffer).await?;
+            tunnel.send_vpn(&buffer).await?;
+        }
+    };
+
+    // Download task
+    let download_task = async {
+        loop {
+            let down_pkt = ctx.tunnel.recv_vpn().await?;
+            let len_bytes = (down_pkt.len() as u16).to_le_bytes();
+            stdout.write_all(&len_bytes).await?;
+            stdout.write_all(&down_pkt).await?;
+            stdout.flush().await?;
+        }
+    };
+
+    download_task.race(upload_task).await
 }
